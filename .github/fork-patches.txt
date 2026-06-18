@@ -1,0 +1,13 @@
+# Fork patches applied on top of upstream/main, in order.
+#
+# One git ref per line:
+#   - a full 40-char commit SHA (preferred — reproducible), or
+#   - "owner:branch" to cherry-pick the tip of a fork branch.
+# Blank lines and lines starting with '#' are ignored.
+#
+# Conflicts never silently drop a patch. The build skips the conflicting patch,
+# ships without it, and opens a "fork-conflict" issue; the conflict-resolver
+# workflow then rebases the patch onto upstream and updates its SHA here.
+
+# app-shortcuts: launcher shortcuts to connect/disconnect the VPN  (PR tailscale/tailscale-android#810)
+76b307f3e2e5703f6b61f80cd13ee2cb4dff8071
