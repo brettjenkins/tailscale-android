@@ -7,7 +7,7 @@ name: Fork conflict auto-resolver
 # but a bad resolution can never reach the branch (let alone users) because the
 # build gate runs before the push.
 #
-# Requires secrets: ANTHROPIC_API_KEY (and optionally PUSHOVER_TOKEN / PUSHOVER_USER).
+# Requires secrets: CLAUDE_CODE_OAUTH_TOKEN (and optionally PUSHOVER_TOKEN / PUSHOVER_USER).
 
 on:
   issues:
@@ -82,7 +82,7 @@ jobs:
         if: steps.detect.outputs.needs_ai == 'true'
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--allowedTools Bash,Read,Edit,Write,Glob,Grep --max-turns 50"
           prompt: |
             You are maintaining a FORK of the Tailscale Android VPN client. The fork's
