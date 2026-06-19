@@ -10,4 +10,6 @@
 # workflow then rebases the patch onto upstream and updates its SHA here.
 
 # app-shortcuts: launcher shortcuts to connect/disconnect the VPN  (PR tailscale/tailscale-android#810)
-76b307f3e2e5703f6b61f80cd13ee2cb4dff8071
+# Tracks the branch tip (force-fetched, so it's always reachable and auto-picks
+# up rebases). Pin a 40-char SHA instead if you want a reproducible build.
+brettjenkins:app-shortcuts

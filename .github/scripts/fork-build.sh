@@ -34,6 +34,10 @@ integrate() {
   upstream_short="$(git rev-parse --short upstream/main)"
   git checkout --quiet -B build-int upstream/main
 
+  # cherry-pick creates commits; CI runners have no git identity by default.
+  git config user.email "fork-ci@users.noreply.github.com"
+  git config user.name "fork-ci"
+
   : >applied.txt
   : >skipped.txt
   local had_skip=false
@@ -42,12 +46,31 @@ integrate() {
     [ -z "$ref" ] && continue
     local resolved="$ref"
     if [[ "$ref" == *:* ]]; then
-      local owner="${ref%%:*}" branch="${ref#*:}"
-      git fetch --quiet "https://github.com/${owner}/tailscale-android.git" "$branch"
-      resolved="FETCH_HEAD"
+      # owner:branch -- the patch branch lives on this fork (origin). Fetch it
+      # into a stable remote-tracking ref and resolve via that, never FETCH_HEAD
+      # (which a failed fetch would leave pointing at upstream/main -> empty
+      # cherry-pick misread as a no-op).
+      local branch="${ref#*:}"
+      git fetch --quiet origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || true
+      resolved="origin/${branch}"
+    else
+      # Bare SHA: make sure the object is present (GitHub serves reachable SHAs).
+      git fetch --quiet origin "$ref" 2>/dev/null || true
     fi
 
-    if git cherry-pick -x "$resolved" >/dev/null 2>&1; then
+    # Resolve to a real commit first. An unreachable/unknown ref is a reported
+    # ERROR, never a silent no-op -- that would drop a patch without warning.
+    local commit
+    if ! commit="$(git rev-parse --verify --quiet "${resolved}^{commit}")"; then
+      echo "${ref} — ERROR: ref not found / not reachable" >>skipped.txt
+      echo "::error::Fork patch ${ref} could not be resolved — not applied"
+      had_skip=true
+      continue
+    fi
+
+    local cprc=0
+    git cherry-pick -x "$commit" >cp.out 2>&1 || cprc=$?
+    if [ "$cprc" -eq 0 ]; then
       echo "$(git rev-parse --short HEAD) $(git log -1 --format=%s)" >>applied.txt
     elif git diff --name-only --diff-filter=U | grep -q .; then
       local files
@@ -56,11 +79,18 @@ integrate() {
       echo "${ref} — conflicts in: ${files}" >>skipped.txt
       echo "::warning::Fork patch ${ref} skipped (conflicts in: ${files})"
       had_skip=true
-    else
-      # Empty/redundant cherry-pick: the change is already in upstream. Treat as a no-op.
+    elif grep -qiE "is now empty|nothing to commit" cp.out; then
+      # Genuinely empty: the change is already present upstream. A real no-op.
       git cherry-pick --skip 2>/dev/null || git cherry-pick --abort 2>/dev/null || true
       echo "${ref} (already in upstream — no-op)" >>applied.txt
+    else
+      # Any other failure (e.g. tooling error) -- report, never silently drop.
+      git cherry-pick --abort 2>/dev/null || true
+      echo "${ref} — ERROR: $(tr '\n' ' ' <cp.out | head -c 160)" >>skipped.txt
+      echo "::error::Fork patch ${ref} cherry-pick failed — not applied"
+      had_skip=true
     fi
+    rm -f cp.out
   done < <(read_patches)
 
   out "upstream_sha=${upstream_sha}"
@@ -92,7 +122,7 @@ sign() {
   bt="$(ls -d "${ANDROID_SDK_ROOT:?}"/build-tools/*/ | sort -V | tail -1)"
   ks="${RUNNER_TEMP:-/tmp}/fork.jks"
   echo "$SIGNING_KEYSTORE_BASE64" | base64 -d >"$ks"
-  trap 'rm -f "$ks"' EXIT
+  trap "rm -f '$ks'" EXIT
 
   "${bt}zipalign" -p -f 4 tailscale-debug.apk tailscale-aligned.apk
   "${bt}apksigner" sign \

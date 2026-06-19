@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      # Pin gh to this fork; the integrate step adds an `upstream` remote that
+      # would otherwise make gh target tailscale/tailscale-android.
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
