@@ -125,13 +125,37 @@ jobs:
 
       # --- conflict reporting (skipped patches) ---
       - if: steps.check.outputs.skip != 'true' && steps.integrate.outputs.skipped == 'true'
+        id: report
         name: Report skipped patches
         run: |
           gh label create fork-conflict --color B60205 --description "A fork patch failed to apply" 2>/dev/null || true
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           BODY="$(printf 'Fork patches were skipped due to conflicts ([run](%s)):\n\n' "$RUN_URL"; sed 's/^/- /' skipped.txt)"
           NUM="$(gh issue list --label fork-conflict --state open --json number -q '.[0].number' || true)"
-          if [ -n "$NUM" ]; then gh issue comment "$NUM" --body "$BODY"; else gh issue create --title "Fork patch conflict" --label fork-conflict --body "$BODY"; fi
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "$BODY"
+            echo "new_conflict=false" >>"$GITHUB_OUTPUT"
+          else
+            gh issue create --title "Fork patch conflict" --label fork-conflict --body "$BODY"
+            echo "new_conflict=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Auto-dispatch the resolver for each newly-conflicting branch patch. Needs a
+      # PAT (FORK_DISPATCH_PAT, Actions: write) -- a GITHUB_TOKEN-initiated dispatch
+      # does not start a workflow (anti-recursion rule). No PAT -> skipped, and the
+      # issue above is still opened for a manual run. Only fires on a NEW conflict
+      # so a persisting one doesn't re-dispatch every build.
+      - if: steps.check.outputs.skip != 'true' && steps.report.outputs.new_conflict == 'true'
+        name: Dispatch the conflict resolver
+        env:
+          GH_TOKEN: ${{ secrets.FORK_DISPATCH_PAT }}
+        run: |
+          [ -n "${GH_TOKEN:-}" ] || { echo "No FORK_DISPATCH_PAT set; skipping auto-dispatch."; exit 0; }
+          grep -oE '[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]+' skipped.txt | awk -F: '{print $2}' | sort -u | while read -r br; do
+            [ -n "$br" ] || continue
+            echo "Dispatching resolver for branch: $br"
+            gh workflow run fork-conflict-resolver.yml --repo "$GITHUB_REPOSITORY" -f branch="$br" || true
+          done
 
       - if: steps.check.outputs.skip != 'true' && steps.integrate.outputs.skipped == 'true'
         name: Pushover — conflict
