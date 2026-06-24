@@ -10,6 +10,22 @@ publishes it to [Releases](../../releases).
 
 <p align="center"><img src="docs/fork-flow.svg" alt="How the fork stays current: every few hours it applies the fork's patches onto the latest upstream, builds and signs an APK, and publishes a release. If a patch clashes, Claude redoes it automatically." width="700"></p>
 
+## Why this exists
+
+Years ago I wrote the original broadcast-intent support in the Tailscale Android app (`IPNReceiver`, the part that lets automation tools connect and disconnect the VPN). It worked well at the time. But as Android's background and power-management restrictions have tightened over the years (Doze, app standby, and aggressive OEM battery managers like Samsung's "deep sleep"), the broadcast approach became unreliable: it often can't wake the app once the system has stopped it.
+
+So I wrote a fix: launcher shortcuts backed by a tiny activity that reliably wakes the app and starts the VPN, and opened it upstream as [tailscale/tailscale-android#810](https://github.com/tailscale/tailscale-android/pull/810). Like a lot of open source, review can take a while; maintainers are busy and a small feature can sit for a long time. I wanted to use it now.
+
+The obvious workaround, building the app once with my patch and just running that, is a bad idea for a VPN: the moment you freeze on an old build you stop getting upstream's security fixes. So this fork does the opposite. It **rebuilds against the latest `tailscale/tailscale-android` automatically** (every few hours) and re-applies the patches on top, so I get my feature *and* every upstream change, with no manual effort (see the diagram above).
+
+**This is an early-release process, not a competing app.** Tailscale is a security product that people trust, and I want this to stay as close to the real thing as possible; I'm not trying to take it in my own direction. So:
+
+- **Every patch here is also an open PR upstream.** If a change isn't something genuinely trying to land in real Tailscale, it doesn't belong here. Once upstream merges a patch, it's dropped from this fork (you're back on stock).
+- **It's all open, so please look.** The patches, the build, the signing, the auto-resolver: nothing is hidden, and I'd honestly rather you check than take my word for it.
+- **Want a feature released early?** Open it as a PR upstream first, then I'm happy to consider adding it to the [patch list](.github/fork-patches.txt). Upstream-first is the rule precisely so this stays a preview of things heading into real Tailscale.
+
+Ultimately I'm just someone who wanted this feature now without running a stale, insecure build. If you need vendor guarantees, use the official app. This is a convenience, offered in good faith.
+
 ## Included patches (not yet in upstream)
 
 The changes this fork adds on top of upstream. Each lives on its own branch listed in
