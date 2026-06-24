@@ -8,6 +8,17 @@ publishes it to [Releases](../../releases).
 
 > Not affiliated with or endorsed by Tailscale Inc. Use at your own risk.
 
+## Included patches (not yet in upstream)
+
+The changes this fork adds on top of upstream. Each lives on its own branch listed in
+[`.github/fork-patches.txt`](.github/fork-patches.txt) and is re-applied on every build:
+
+| Patch | What it does | Upstream PR |
+|---|---|---|
+| `app-shortcuts` | Launcher shortcuts (+ Tasker / Samsung Routines intents) to connect/disconnect the VPN, via a foreground trampoline that reliably wakes a stopped/deep-slept app | [tailscale/tailscale-android#810](https://github.com/tailscale/tailscale-android/pull/810) |
+
+When a patch is merged upstream it's removed from the list (upstream already has it).
+
 ## Install
 
 1. **Uninstall the official Tailscale app first.** This fork uses the same
@@ -16,11 +27,16 @@ publishes it to [Releases](../../releases).
 2. Download the latest `tailscale-fork-signed.apk` from the [Releases page](../../releases).
 3. Allow "install unknown apps" for your browser/file manager, then install.
 
-## Auto-updates (recommended)
+## Auto-updates with Obtainium (recommended)
 
-Use [Obtainium](https://github.com/ImranR98/Obtainium): add this repo as an app source.
-Obtainium watches the Releases here and installs new builds automatically — pairing
-well with the 6-hourly cadence.
+[Obtainium](https://github.com/ImranR98/Obtainium) installs and auto-updates the APK
+straight from this repo's GitHub Releases:
+
+1. Install Obtainium (from its [releases](https://github.com/ImranR98/Obtainium/releases), or F-Droid / IzzyOnDroid).
+2. Tap **Add App** and paste this repo's URL:
+   `https://github.com/brettjenkins/tailscale-android`
+3. Obtainium finds the `tailscale-fork-signed.apk` asset — tap **Install**. It then
+   offers each new 6-hourly build automatically.
 
 > Because the signing key differs from the Play Store build, you cannot switch between
 > this fork and the official app without uninstalling/reinstalling (which clears local
