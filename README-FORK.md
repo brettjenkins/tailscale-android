@@ -8,6 +8,8 @@ publishes it to [Releases](../../releases).
 
 > Not affiliated with or endorsed by Tailscale Inc. Use at your own risk.
 
+<p align="center"><img src="docs/fork-flow.svg" alt="How the fork stays current: every few hours it applies the fork's patches onto the latest upstream, builds and signs an APK, and publishes a release. If a patch clashes, Claude redoes it automatically." width="700"></p>
+
 ## Included patches (not yet in upstream)
 
 The changes this fork adds on top of upstream. Each lives on its own branch listed in
