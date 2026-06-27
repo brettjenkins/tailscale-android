@@ -44,53 +44,78 @@ integrate() {
 
   while IFS= read -r ref; do
     [ -z "$ref" ] && continue
-    local resolved="$ref"
+
+    # Resolve the ref to an ordered (oldest-first) list of commits to apply:
+    #   owner:branch -> EVERY commit on that branch not already in upstream/main,
+    #                   so a multi-commit feature branch is applied in full (not
+    #                   just its tip -- that silently dropped earlier commits).
+    #   bare SHA     -> exactly that one commit.
+    # An unreachable/unknown ref is a reported ERROR, never a silent no-op --
+    # that would drop a patch without warning.
+    local commits
     if [[ "$ref" == *:* ]]; then
       # owner:branch -- the patch branch lives on this fork (origin). Fetch it
       # into a stable remote-tracking ref and resolve via that, never FETCH_HEAD
-      # (which a failed fetch would leave pointing at upstream/main -> empty
-      # cherry-pick misread as a no-op).
+      # (which a failed fetch would leave pointing at upstream/main).
       local branch="${ref#*:}"
       git fetch --quiet origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || true
-      resolved="origin/${branch}"
+      if ! git rev-parse --verify --quiet "origin/${branch}^{commit}" >/dev/null; then
+        echo "${ref} — ERROR: ref not found / not reachable" >>skipped.txt
+        echo "::error::Fork patch ${ref} could not be resolved — not applied"
+        had_skip=true
+        continue
+      fi
+      commits="$(git rev-list --reverse "upstream/main..origin/${branch}")"
+      if [ -z "$commits" ]; then
+        echo "${ref} (already in upstream — no-op)" >>applied.txt
+        continue
+      fi
     else
       # Bare SHA: make sure the object is present (GitHub serves reachable SHAs).
       git fetch --quiet origin "$ref" 2>/dev/null || true
+      if ! commits="$(git rev-parse --verify --quiet "${ref}^{commit}")"; then
+        echo "${ref} — ERROR: ref not found / not reachable" >>skipped.txt
+        echo "::error::Fork patch ${ref} could not be resolved — not applied"
+        had_skip=true
+        continue
+      fi
     fi
 
-    # Resolve to a real commit first. An unreachable/unknown ref is a reported
-    # ERROR, never a silent no-op -- that would drop a patch without warning.
+    # Apply each resolved commit in order. A conflicting commit is aborted and
+    # recorded; earlier commits from the same branch stay applied (and are
+    # reported), so a partial branch is never shipped silently.
     local commit
-    if ! commit="$(git rev-parse --verify --quiet "${resolved}^{commit}")"; then
-      echo "${ref} — ERROR: ref not found / not reachable" >>skipped.txt
-      echo "::error::Fork patch ${ref} could not be resolved — not applied"
-      had_skip=true
-      continue
-    fi
+    for commit in $commits; do
+      # Tag branch entries with the short SHA so a multi-commit branch's report
+      # lines stay distinct; the "owner:branch" prefix is kept intact so the
+      # resolver's branch-name extraction in fork-release.yml still matches.
+      local label="$ref"
+      [[ "$ref" == *:* ]] && label="${ref} (${commit:0:9})"
 
-    local cprc=0
-    git cherry-pick -x "$commit" >cp.out 2>&1 || cprc=$?
-    if [ "$cprc" -eq 0 ]; then
-      echo "$(git rev-parse --short HEAD) $(git log -1 --format=%s)" >>applied.txt
-    elif git diff --name-only --diff-filter=U | grep -q .; then
-      local files
-      files="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
-      git cherry-pick --abort 2>/dev/null || true
-      echo "${ref} — conflicts in: ${files}" >>skipped.txt
-      echo "::warning::Fork patch ${ref} skipped (conflicts in: ${files})"
-      had_skip=true
-    elif grep -qiE "is now empty|nothing to commit" cp.out; then
-      # Genuinely empty: the change is already present upstream. A real no-op.
-      git cherry-pick --skip 2>/dev/null || git cherry-pick --abort 2>/dev/null || true
-      echo "${ref} (already in upstream — no-op)" >>applied.txt
-    else
-      # Any other failure (e.g. tooling error) -- report, never silently drop.
-      git cherry-pick --abort 2>/dev/null || true
-      echo "${ref} — ERROR: $(tr '\n' ' ' <cp.out | head -c 160)" >>skipped.txt
-      echo "::error::Fork patch ${ref} cherry-pick failed — not applied"
-      had_skip=true
-    fi
-    rm -f cp.out
+      local cprc=0
+      git cherry-pick -x "$commit" >cp.out 2>&1 || cprc=$?
+      if [ "$cprc" -eq 0 ]; then
+        echo "$(git rev-parse --short HEAD) $(git log -1 --format=%s)" >>applied.txt
+      elif git diff --name-only --diff-filter=U | grep -q .; then
+        local files
+        files="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+        git cherry-pick --abort 2>/dev/null || true
+        echo "${label} — conflicts in: ${files}" >>skipped.txt
+        echo "::warning::Fork patch ${label} skipped (conflicts in: ${files})"
+        had_skip=true
+      elif grep -qiE "is now empty|nothing to commit" cp.out; then
+        # Genuinely empty: the change is already present upstream. A real no-op.
+        git cherry-pick --skip 2>/dev/null || git cherry-pick --abort 2>/dev/null || true
+        echo "${label} (already in upstream — no-op)" >>applied.txt
+      else
+        # Any other failure (e.g. tooling error) -- report, never silently drop.
+        git cherry-pick --abort 2>/dev/null || true
+        echo "${label} — ERROR: $(tr '\n' ' ' <cp.out | head -c 160)" >>skipped.txt
+        echo "::error::Fork patch ${label} cherry-pick failed — not applied"
+        had_skip=true
+      fi
+      rm -f cp.out
+    done
   done < <(read_patches)
 
   out "upstream_sha=${upstream_sha}"
