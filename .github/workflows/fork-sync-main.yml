@@ -14,6 +14,10 @@ on:
 
 permissions:
   contents: write
+  # Upstream ships its own workflow files (e.g. integration-test.yml). Rebuilding
+  # main onto the upstream tip re-adds/updates files under .github/workflows, and
+  # GITHUB_TOKEN needs `workflows: write` or the push is rejected.
+  workflows: write
 
 concurrency:
   group: fork-sync-main
@@ -84,6 +88,6 @@ jobs:
             curl -s \
               -F "token=${{ secrets.PUSHOVER_TOKEN }}" -F "user=${{ secrets.PUSHOVER_USER }}" \
               -F "title=Fork main-sync failed" \
-              -F "message=Could not rebuild main onto upstream (likely a README banner conflict). ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              -F "message=Could not rebuild/push main onto upstream. Check the run logs for the failing step. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
               https://api.pushover.net/1/messages.json >/dev/null || true
           fi
