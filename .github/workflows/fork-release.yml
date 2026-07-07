@@ -1,0 +1,183 @@
+name: Fork auto build & release
+
+# Tracks tailscale/tailscale-android main, layers the fork patches listed in
+# .github/fork-patches.txt, builds a debug APK signed with a stable keystore,
+# and publishes it as a GitHub Release. See README-FORK.md.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6h (UTC); GitHub may delay under load
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if upstream is unchanged"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # create releases
+  issues: write # open the fork-conflict report issue
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Pin gh to this fork; the integrate step adds an `upstream` remote that
+      # would otherwise make gh target tailscale/tailscale-android.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      # Stage the fork-CI files out of the tree: `integrate` checks out
+      # upstream/main, which does not contain them.
+      - name: Stage fork-CI files
+        run: cp .github/scripts/fork-build.sh .github/fork-patches.txt "$RUNNER_TEMP/"
+
+      - id: check
+        name: Has upstream changed?
+        run: |
+          UPSTREAM_SHA="$(git ls-remote https://github.com/tailscale/tailscale-android.git main | cut -f1)"
+          LAST_SHA="$(gh release view --json body -q .body 2>/dev/null \
+            | grep -oE 'upstream-sha: [0-9a-f]{40}' | awk '{print $2}' || true)"
+          echo "upstream=$UPSTREAM_SHA last=${LAST_SHA:-none}"
+          if [ "$UPSTREAM_SHA" = "$LAST_SHA" ] && [ "${{ github.event.inputs.force }}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged — nothing to build."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: integrate
+        if: steps.check.outputs.skip != 'true'
+        name: Integrate upstream + fork patches
+        env:
+          PATCHES_FILE: ${{ runner.temp }}/fork-patches.txt
+        run: bash "$RUNNER_TEMP/fork-build.sh" integrate
+
+      - if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version-file: "go.mod"
+      - if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - id: ver
+        if: steps.check.outputs.skip != 'true'
+        name: Inject monotonic versionCode
+        run: bash "$RUNNER_TEMP/fork-build.sh" set-version
+
+      - if: steps.check.outputs.skip != 'true'
+        name: Build debug APK
+        run: make tailscale-debug.apk
+
+      - if: steps.check.outputs.skip != 'true'
+        name: Re-sign with stable fork keystore
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: bash "$RUNNER_TEMP/fork-build.sh" sign
+
+      - id: notes
+        if: steps.check.outputs.skip != 'true'
+        name: Assemble release notes
+        run: |
+          DATE="$(date -u +%Y%m%d)"
+          TAG="fork-${DATE}-${{ steps.integrate.outputs.upstream_short }}"
+          # avoid tag collision on a same-day forced rebuild of the same SHA
+          if gh release view "$TAG" >/dev/null 2>&1; then TAG="${TAG}-r${GITHUB_RUN_NUMBER}"; fi
+          {
+            echo "Automated fork build of tailscale/tailscale-android."
+            echo
+            echo "upstream-sha: ${{ steps.integrate.outputs.upstream_sha }}"
+            echo "built-at: $(date -u +%FT%TZ)"
+            echo "versionCode: ${{ steps.ver.outputs.version_code }}"
+            echo
+            echo "Applied patches:"; sed 's/^/- /' applied.txt
+            if [ -s skipped.txt ]; then
+              echo; echo "Skipped patches (conflicts — NOT in this build):"; sed 's/^/- /' skipped.txt
+            fi
+            echo
+            echo "Install: see README-FORK.md. Same applicationId as the official app —"
+            echo "uninstall it first. Track this repo in Obtainium for auto-updates."
+          } > release-notes.md
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=Tailscale (fork) ${DATE}" >> "$GITHUB_OUTPUT"
+
+      - if: steps.check.outputs.skip != 'true'
+        name: Publish release
+        run: |
+          gh release create "${{ steps.notes.outputs.tag }}" \
+            tailscale-fork-signed.apk \
+            --title "${{ steps.notes.outputs.title }}" \
+            --notes-file release-notes.md
+
+      # --- conflict reporting (skipped patches) ---
+      - if: steps.check.outputs.skip != 'true' && steps.integrate.outputs.skipped == 'true'
+        id: report
+        name: Report skipped patches
+        run: |
+          gh label create fork-conflict --color B60205 --description "A fork patch failed to apply" 2>/dev/null || true
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          BODY="$(printf 'Fork patches were skipped due to conflicts ([run](%s)):\n\n' "$RUN_URL"; sed 's/^/- /' skipped.txt)"
+          NUM="$(gh issue list --label fork-conflict --state open --json number -q '.[0].number' || true)"
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "$BODY"
+            echo "new_conflict=false" >>"$GITHUB_OUTPUT"
+          else
+            gh issue create --title "Fork patch conflict" --label fork-conflict --body "$BODY"
+            echo "new_conflict=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Auto-dispatch the resolver for each newly-conflicting branch patch. Needs a
+      # PAT (FORK_DISPATCH_PAT, Actions: write) -- a GITHUB_TOKEN-initiated dispatch
+      # does not start a workflow (anti-recursion rule). No PAT -> skipped, and the
+      # issue above is still opened for a manual run. Only fires on a NEW conflict
+      # so a persisting one doesn't re-dispatch every build.
+      - if: steps.check.outputs.skip != 'true' && steps.report.outputs.new_conflict == 'true'
+        name: Dispatch the conflict resolver
+        env:
+          GH_TOKEN: ${{ secrets.FORK_DISPATCH_PAT }}
+        run: |
+          [ -n "${GH_TOKEN:-}" ] || { echo "No FORK_DISPATCH_PAT set; skipping auto-dispatch."; exit 0; }
+          grep -oE '[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]+' skipped.txt | awk -F: '{print $2}' | sort -u | while read -r br; do
+            [ -n "$br" ] || continue
+            echo "Dispatching resolver for branch: $br"
+            gh workflow run fork-conflict-resolver.yml --repo "$GITHUB_REPOSITORY" -f branch="$br" || true
+          done
+
+      - if: steps.check.outputs.skip != 'true' && steps.integrate.outputs.skipped == 'true'
+        name: Pushover — conflict
+        env:
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+        run: |
+          [ -z "$PUSHOVER_TOKEN" ] && exit 0
+          curl -s -F "token=$PUSHOVER_TOKEN" -F "user=$PUSHOVER_USER" -F "priority=0" \
+            -F "title=Fork patch conflict" \
+            -F "message=A fork patch was skipped; see the fork-conflict issue." \
+            https://api.pushover.net/1/messages.json >/dev/null
+
+      # --- loud failure notification (upstream broken / build failed) ---
+      - if: failure()
+        name: Pushover — build failed
+        env:
+          PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+          PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+        run: |
+          [ -z "$PUSHOVER_TOKEN" ] && exit 0
+          curl -s -F "token=$PUSHOVER_TOKEN" -F "user=$PUSHOVER_USER" -F "priority=1" \
+            -F "title=Fork build FAILED" \
+            -F "message=fork-release run failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            https://api.pushover.net/1/messages.json >/dev/null
