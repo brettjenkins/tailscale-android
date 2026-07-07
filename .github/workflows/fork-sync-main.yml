@@ -14,10 +14,6 @@ on:
 
 permissions:
   contents: write
-  # Upstream ships its own workflow files (e.g. integration-test.yml). Rebuilding
-  # main onto the upstream tip re-adds/updates files under .github/workflows, and
-  # GITHUB_TOKEN needs `workflows: write` or the push is rejected.
-  workflows: write
 
 concurrency:
   group: fork-sync-main
@@ -34,6 +30,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          # GITHUB_TOKEN cannot push changes to .github/workflows/ files (a hard
+          # GitHub restriction), and upstream ships its own workflow files that
+          # this job re-adds/updates when rebuilding main onto the upstream tip.
+          # Use FORK_DISPATCH_PAT (needs `workflow` / fine-grained "Workflows:
+          # write" scope) so those pushes succeed; fall back to github.token when
+          # the PAT is unset -- the job then works for everything except upstream
+          # workflow-file changes, exactly as before.
+          token: ${{ secrets.FORK_DISPATCH_PAT || github.token }}
 
       - name: Rebuild main as upstream + fork overlay
         run: |
