@@ -37,7 +37,11 @@ android {
     defaultConfig {
         minSdkVersion 26
         targetSdkVersion 35
-        versionCode computeVersionCode()
+        // versionCode is written here by `make bumposs` / `make tag_release`
+        // (base = major*100000000 + minor*100000 + patch*10). AndroidTV builds
+        // increment this by 1 in the Makefile's release-tv target so the two
+        // variants are distinguishable in the Play Store.
+        versionCode 110101660
         versionName getVersionProperty("VERSION_LONG")
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -192,19 +196,6 @@ def getVersionProperty(key) {
     versionProps.load(project.file('../tailscale.version').newDataInputStream())
     return versionProps.getProperty(key).replaceAll('^\"|\"$', '')
 }
-
-def computeVersionCode() {
-    def versionProps = new Properties()
-    versionProps.load(project.file('../tailscale.version').newDataInputStream())
-    
-    def major = versionProps.getProperty('VERSION_MAJOR') as int
-    def minor = versionProps.getProperty('VERSION_MINOR') as int
-    def patch = versionProps.getProperty('VERSION_PATCH') as int
-    // The platform is 0 for Android, 1 for AndroidTV. This is used to distinguish the two in the Play Store.
-    def platform = isTV() ? 1 : 0
-    
-    return major * 100000000 + minor * 100000 + patch * 10 + platform
-}   
 
 def isTV() {
     return project.findProperty('PLATFORM')?.toString() == 'tv'

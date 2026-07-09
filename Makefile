@@ -156,10 +156,21 @@ $(RELEASE_AAB): version gradle-dependencies
 	(cd android && ./gradlew test bundleRelease)
 	install -C ./android/build/outputs/bundle/release/android-release.aab $@
 
-# PLATFORM=tv signals to gradle that we should build for AndroidTV
+# PLATFORM=tv signals to gradle that we should build for AndroidTV. To
+# distinguish the TV variant from the phone/tablet build in the Play Store,
+# we temporarily increment the versionCode in android/build.gradle by 1 for
+# the duration of the build, then restore the original value via a shell trap
+# so the working tree is left clean even if the gradle build fails.
 $(RELEASE_TV_AAB): version gradle-dependencies
 	@echo "Building TV release AAB"
-	(cd android && ./gradlew test bundleRelease -PPLATFORM=tv)
+	@set -e; \
+		ORIG_VC=$$(grep -oE 'versionCode [0-9]+' android/build.gradle | awk '{print $$2}'); \
+		TV_VC=$$((ORIG_VC + 1)); \
+		echo "TV versionCode: $$ORIG_VC -> $$TV_VC"; \
+		trap "sed -i.bak -E 's/versionCode [0-9]+/versionCode $$ORIG_VC/' android/build.gradle && rm -f android/build.gradle.bak" EXIT INT TERM HUP; \
+		sed -i.bak -E "s/versionCode [0-9]+/versionCode $$TV_VC/" android/build.gradle; \
+		rm -f android/build.gradle.bak; \
+		(cd android && ./gradlew test bundleRelease -PPLATFORM=tv)
 	install -C ./android/build/outputs/bundle/release/android-release.aab $@
 
 tailscale-test.apk: version gradle-dependencies
@@ -279,13 +290,26 @@ androidpath:
 	@echo 'export PATH=$(ANDROID_HOME)/cmdline-tools/latest/bin:$(ANDROID_HOME)/platform-tools:$$PATH'
 
 .PHONY: tag_release
-tag_release: tailscale.version ## Tag the current commit with the current version
-	source tailscale.version && git tag -a "$${VERSION_LONG}" -m "OSS and Version updated to $${VERSION_LONG}"
+tag_release: tailscale.version bump-version-code ## Tag the current commit with the current version
+	@if ! git diff --quiet -- android/build.gradle; then \
+		source tailscale.version && git commit -sm "android: bump versionCode for $${VERSION_LONG}" android/build.gradle; \
+	fi
+	source tailscale.version && git tag -a "$${VERSION_LONG}" -m "Version updated to $${VERSION_LONG}"
 
 .PHONY: bumposs ## Bump to the latest oss and update the versions.
-bumposs: update-oss tailscale.version
+bumposs: update-oss tailscale.version bump-version-code
 	source tailscale.version && git commit -sm "android: bump OSS" -m "OSS and Version updated to $${VERSION_LONG}" go.toolchain.rev android/build.gradle go.mod go.sum
 	source tailscale.version && git tag -a "$${VERSION_LONG}" -m "OSS and Version updated to $${VERSION_LONG}"
+
+# Recomputes the base versionCode from tailscale.version and rewrites the
+# `versionCode <n>` line in android/build.gradled
+.PHONY: bump-version-code
+bump-version-code: tailscale.version
+	@source tailscale.version && \
+		BASE_VERSION_CODE=$$((VERSION_MAJOR * 100000000 + VERSION_MINOR * 100000 + VERSION_PATCH * 10)) && \
+		echo "Setting android/build.gradle versionCode to $$BASE_VERSION_CODE" && \
+		sed -i.bak -E "s/versionCode [0-9]+/versionCode $$BASE_VERSION_CODE/" android/build.gradle && \
+		rm android/build.gradle.bak
 
 .PHONY: update-oss ## Update the tailscale.com go module
 update-oss:
