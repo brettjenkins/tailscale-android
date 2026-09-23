@@ -132,8 +132,22 @@ integrate() {
 set_version() {
   local code
   code="$(date -u +%y%m%d%H)"
-  sed -i "s/versionCode .*/versionCode ${code}/" android/build.gradle
-  echo "versionCode set to ${code}"
+  # Upstream moved to the Kotlin DSL (tailscale-android#862); keep the Groovy
+  # form as a fallback for older upstream checkouts.
+  local gradle
+  if [ -f android/build.gradle.kts ]; then
+    gradle=android/build.gradle.kts
+    sed -i -E "s/^([[:space:]]*versionCode[[:space:]]*=[[:space:]]*).*/\1${code}/" "$gradle"
+  else
+    gradle=android/build.gradle
+    sed -i -E "s/^([[:space:]]*versionCode[[:space:]]+).*/\1${code}/" "$gradle"
+  fi
+  # A pattern that silently stops matching would ship upstream's versionCode.
+  if ! grep -qE "versionCode[[:space:]=]+${code}\$" "$gradle"; then
+    echo "::error::versionCode not found in ${gradle} — layout changed upstream?"
+    exit 1
+  fi
+  echo "versionCode set to ${code} in ${gradle}"
   out "version_code=${code}"
 }
 
