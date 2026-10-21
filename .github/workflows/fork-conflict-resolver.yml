@@ -1,0 +1,169 @@
+name: Fork conflict auto-resolver
+
+# When the build workflow opens a "fork-conflict" issue (a fork patch failed to
+# apply onto new upstream), this rebases the patch branch onto upstream, lets
+# Claude resolve the conflicts under strict VPN-security rules, then BUILD-VERIFIES
+# the result and only force-pushes the branch if the build + tests pass. Full-auto,
+# but a bad resolution can never reach the branch (let alone users) because the
+# build gate runs before the push.
+#
+# Requires secrets: CLAUDE_CODE_OAUTH_TOKEN (and optionally PUSHOVER_TOKEN / PUSHOVER_USER).
+
+on:
+  issues:
+    types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Patch branch to rebase onto upstream and resolve"
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-resolver
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.issue.labels.*.name, 'fork-conflict')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      UPSTREAM_URL: https://github.com/tailscale/tailscale-android.git
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Identify the conflicting patch branch
+        id: pick
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ github.event.inputs.branch }}"
+          else
+            # The build lists conflicting refs as "owner:branch — conflicts in: ..."
+            # in the issue body. Take the first owner:branch, use its branch part.
+            BRANCH="$(printf '%s' "${{ github.event.issue.body }}" \
+              | grep -oE '[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]+' | head -1 | cut -d: -f2 || true)"
+          fi
+          [ -n "${BRANCH:-}" ] || { echo "::error::no patch branch found in issue/input"; exit 1; }
+          echo "branch=$BRANCH" >>"$GITHUB_OUTPUT"
+          echo "Patch branch: $BRANCH"
+
+      - name: Prepare repo + detect conflict
+        id: detect
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.pick.outputs.branch }}"
+          git config user.email "fork-ci@users.noreply.github.com"
+          git config user.name "fork-ci"
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --quiet upstream main
+          git fetch --quiet origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+          git checkout -B "$BRANCH" "origin/${BRANCH}"
+          # Try a clean rebase first; if it conflicts, abort and hand to Claude.
+          if git rebase upstream/main; then
+            echo "needs_ai=false" >>"$GITHUB_OUTPUT"
+            echo "Rebased cleanly — no AI needed."
+          else
+            git rebase --abort
+            echo "needs_ai=true" >>"$GITHUB_OUTPUT"
+            echo "Conflicts present — Claude will resolve."
+          fi
+
+      - name: Claude resolves the rebase conflicts
+        if: steps.detect.outputs.needs_ai == 'true'
+        uses: anthropics/claude-code-action@51705da45eecce209d4700538bf8377d5b5fc695 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--allowedTools Bash,Read,Edit,Write,Glob,Grep --max-turns 50"
+          prompt: |
+            You are maintaining a FORK of the Tailscale Android VPN client. The fork's
+            patch branch "${{ steps.pick.outputs.branch }}" is checked out and needs to be
+            rebased onto the latest upstream (the remote-tracking ref `upstream/main`),
+            but the rebase conflicts.
+
+            THIS IS A SECURITY-CRITICAL VPN PRODUCT. Resolve conservatively:
+            - Touch ONLY files git reports as conflicted. Do not change anything else, and
+              do not add features or "improvements".
+            - Reconcile the fork's patch with upstream's changes. Where upstream changed
+              security-relevant code (authentication, key handling, cryptography, VPN/tunnel
+              setup, permissions, exported components, intent/Activity wiring), PREFER
+              UPSTREAM's version and re-apply only the fork's original intent on top of it.
+              Never weaken, revert, or work around a security-relevant upstream change just
+              to make the patch apply.
+            - Remove every conflict marker. The result must keep the fork feature working
+              AND preserve upstream's behaviour.
+            - If any conflict is ambiguous, or you are not fully confident the result is
+              correct and secure, DO NOT GUESS. Run `git rebase --abort`, print the exact
+              line `RESOLUTION_ABANDONED`, and stop. A failed auto-resolve that a human
+              fixes is far better than shipping an unsafe VPN change.
+
+            Procedure:
+            1. `git rebase upstream/main` to start (it will stop on conflicts).
+            2. For each conflicted file: inspect, resolve per the rules above, `git add` it.
+            3. `GIT_EDITOR=true git rebase --continue`. Repeat until the rebase completes.
+            4. Print the exact line `RESOLUTION_DONE` once the rebase is fully complete.
+
+      - name: Verify the resolution
+        if: steps.detect.outputs.needs_ai == 'true'
+        run: |
+          set -euo pipefail
+          if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+            git rebase --abort 2>/dev/null || true
+            echo "::error::Rebase not completed (Claude abandoned or got stuck)."; exit 1
+          fi
+          if git grep -lnE '^(<<<<<<<|=======|>>>>>>>)' -- . 2>/dev/null | grep -q .; then
+            echo "::error::Conflict markers remain in the tree."; exit 1
+          fi
+          if ! git merge-base --is-ancestor upstream/main HEAD; then
+            echo "::error::Branch is not rebased onto current upstream/main."; exit 1
+          fi
+          echo "Resolution verified: rebased onto upstream, no markers."
+
+      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version-file: "go.mod"
+      - uses: actions/setup-java@3a4f6e1af504cf6a31855fa899c6aa5355ba6c12 # v4.7.0
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Build gate (build + tests must pass before any push)
+        run: make tailscale-debug.apk
+
+      - name: Force-push resolved branch + close the issue
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.pick.outputs.branch }}"
+          git push --force-with-lease "origin" "HEAD:refs/heads/${BRANCH}"
+          echo "Pushed rebased ${BRANCH}."
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            gh issue comment "${{ github.event.issue.number }}" --body \
+              "Auto-resolved: rebased \`${BRANCH}\` onto upstream, resolved conflicts, build + tests passed, branch force-updated. The next scheduled build will include it."
+            gh issue close "${{ github.event.issue.number }}" || true
+          fi
+
+      - name: Notify on failure (manual fix needed)
+        if: failure()
+        run: |
+          if [ -n "${{ secrets.PUSHOVER_TOKEN }}" ] && [ -n "${{ secrets.PUSHOVER_USER }}" ]; then
+            curl -s \
+              -F "token=${{ secrets.PUSHOVER_TOKEN }}" \
+              -F "user=${{ secrets.PUSHOVER_USER }}" \
+              -F "priority=1" \
+              -F "title=Fork auto-resolve FAILED — manual fix needed" \
+              -F "message=Branch ${{ steps.pick.outputs.branch }} could not be auto-resolved/built. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              https://api.pushover.net/1/messages.json >/dev/null || true
+          fi
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            gh issue comment "${{ github.event.issue.number }}" --body \
+              "Auto-resolve failed — the rebase/build did not pass cleanly, so nothing was pushed. This conflict needs a manual fix. See the run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
+          fi
