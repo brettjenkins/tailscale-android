@@ -1,0 +1,97 @@
+name: Keep main in sync with upstream
+
+# main carries no hand-written work -- it is just "latest upstream + this fork's
+# overlay" (the fork workflows, scripts, fork-patches.txt, README-FORK.md, docs,
+# and the README banner). This rebuilds it on top of the current upstream tip and
+# force-pushes, so the fork visibly tracks upstream instead of drifting "behind".
+# The overlay is auto-discovered (every file that exists on main but not upstream),
+# so a workflow or README can never be accidentally dropped.
+
+on:
+  schedule:
+    - cron: "30 */6 * * *" # offset from the release build
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      UPSTREAM_URL: https://github.com/tailscale/tailscale-android.git
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          # GITHUB_TOKEN cannot push changes to .github/workflows/ files (a hard
+          # GitHub restriction), and upstream ships its own workflow files that
+          # this job re-adds/updates when rebuilding main onto the upstream tip.
+          # Use FORK_DISPATCH_PAT (needs `workflow` / fine-grained "Workflows:
+          # write" scope) so those pushes succeed; fall back to github.token when
+          # the PAT is unset -- the job then works for everything except upstream
+          # workflow-file changes, exactly as before.
+          token: ${{ secrets.FORK_DISPATCH_PAT || github.token }}
+
+      - name: Rebuild main as upstream + fork overlay
+        run: |
+          set -euo pipefail
+          git config user.email "fork-ci@users.noreply.github.com"
+          git config user.name "fork-ci"
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch --quiet upstream main
+          UP="$(git rev-parse upstream/main)"
+
+          # Auto-discover the overlay: every file present on main but NOT on
+          # upstream (i.e. the files this fork adds). The README banner is a
+          # *modification* to an upstream file, so it is handled separately below.
+          tmp="$(mktemp -d)"
+          mapfile -t OURS < <(git diff --name-only --diff-filter=A "upstream/main" "origin/main")
+          for f in "${OURS[@]}"; do
+            mkdir -p "$tmp/$(dirname "$f")"
+            git show "origin/main:$f" > "$tmp/$f"
+          done
+          echo "Overlay files carried forward:"; printf '  %s\n' "${OURS[@]}"
+
+          # Start clean from the current upstream tip, then lay the overlay back on.
+          git checkout --quiet -B synced upstream/main
+          for f in "${OURS[@]}"; do
+            mkdir -p "$(dirname "$f")"
+            cp "$tmp/$f" "$f"
+          done
+
+          # Re-apply the README banner onto upstream's *current* README (preserves
+          # any upstream README changes; idempotent).
+          if [ -f .github/fork-readme-banner.md ] && ! grep -q "fork-banner" README.md 2>/dev/null; then
+            cat .github/fork-readme-banner.md README.md > "$tmp/README.new"
+            mv "$tmp/README.new" README.md
+          fi
+
+          git add -A
+          git commit --quiet -m "fork: track upstream ${UP:0:12} + CI/docs overlay"
+
+          # Nothing to do if the rebuilt tree is identical to what main already has.
+          if [ "$(git rev-parse synced^{tree})" = "$(git rev-parse origin/main^{tree})" ]; then
+            echo "main already in sync with upstream $UP -- nothing to push."
+            exit 0
+          fi
+
+          git push --force-with-lease=main:"$(git rev-parse origin/main)" origin synced:main
+          echo "Re-synced main onto upstream $UP."
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          if [ -n "${{ secrets.PUSHOVER_TOKEN }}" ] && [ -n "${{ secrets.PUSHOVER_USER }}" ]; then
+            curl -s \
+              -F "token=${{ secrets.PUSHOVER_TOKEN }}" -F "user=${{ secrets.PUSHOVER_USER }}" \
+              -F "title=Fork main-sync failed" \
+              -F "message=Could not rebuild/push main onto upstream. Check the run logs for the failing step. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              https://api.pushover.net/1/messages.json >/dev/null || true
+          fi
